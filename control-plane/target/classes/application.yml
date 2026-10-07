@@ -1,0 +1,42 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: zt-control-plane
+
+  datasource:
+    url: jdbc:postgresql://postgres:5432/ztgateway
+    username: ztadmin
+    password: ztadmin_secret
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: none            # schema managed by init.sql
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+  data:
+    redis:
+      host: redis
+      port: 6379
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+
+# Custom application properties
+zt:
+  opa:
+    url: http://opa:8181/v1/data/ztmesh/authz
+  rate-limit:
+    max-requests: 10
+    window-seconds: 10

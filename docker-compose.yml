@@ -1,0 +1,194 @@
+# ============================================================
+# Zero Trust Microservice Access Gateway — Docker Compose
+# ============================================================
+# Orchestrates all services with proper dependency ordering,
+# health checks, and network isolation.
+#
+# Usage:
+#   docker compose up --build -d
+#   curl -H "Authorization: Bearer test" \
+#        -H "X-User-ID: alice" \
+#        -H "X-Role: user" \
+#        -H "X-Risk-Score: 12" \
+#        http://localhost:8000/api/v1/user/data
+# ============================================================
+
+services:
+
+  # ── Infrastructure ────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ztgateway
+      POSTGRES_USER: ztadmin
+      POSTGRES_PASSWORD: ztadmin_secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ztadmin -d ztgateway"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - zt-internal
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - zt-internal
+
+  # ── Policy Engine ─────────────────────────────────────────
+
+  opa:
+    build:
+      context: ./opa
+      dockerfile: Dockerfile
+    ports:
+      - "8181:8181"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8181/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks:
+      - zt-internal
+
+  # ── Control Plane (Java / Spring Boot) ────────────────────
+
+  control-plane:
+    build:
+      context: ./control-plane
+      dockerfile: Dockerfile
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/ztgateway
+      SPRING_DATASOURCE_USERNAME: ztadmin
+      SPRING_DATASOURCE_PASSWORD: ztadmin_secret
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      ZT_OPA_URL: http://opa:8181/v1/data/ztmesh/authz
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opa:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/v1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+    networks:
+      - zt-internal
+
+  # ── Sandbox File Inspector (Python / FastAPI) ─────────────
+
+  sandbox-service:
+    build:
+      context: ./sandbox-service
+      dockerfile: Dockerfile
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - zt-internal
+
+  # ── Data Plane Proxy (C++ Reverse Proxy) ──────────────────
+
+  data-plane-proxy:
+    build:
+      context: ./data-plane-proxy
+      dockerfile: Dockerfile
+    environment:
+      CONTROL_PLANE_HOST: control-plane
+      CONTROL_PLANE_PORT: "8081"
+      SANDBOX_HOST: sandbox-service
+      SANDBOX_PORT: "8002"
+      TARGET_HOST: target-backend
+      TARGET_PORT: "8080"
+      PROXY_PORT: "8000"
+    ports:
+      - "8000:8000"            # ONLY public-facing port
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      sandbox-service:
+        condition: service_healthy
+      target-backend:
+        condition: service_healthy
+    networks:
+      - zt-internal
+
+  # ── Target Backend (Mock Internal Service) ────────────────
+
+  target-backend:
+    build:
+      context: ./target-backend
+      dockerfile: Dockerfile
+    # NO ports mapping — completely hidden from the host / internet
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/api/v1/public/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - zt-internal
+
+  # ── MCP Server (AI Operations Interface) ──────────────────
+
+  mcp-server:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    environment:
+      PG_DSN: "dbname=ztgateway user=ztadmin password=ztadmin_secret host=postgres port=5432"
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    stdin_open: true           # MCP uses stdio transport
+    networks:
+      - zt-internal
+
+# ── Networks ────────────────────────────────────────────────
+
+networks:
+  zt-internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# ── Volumes ─────────────────────────────────────────────────
+
+volumes:
+  pgdata:
