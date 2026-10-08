@@ -220,7 +220,7 @@ zero-trust-gateway/
 ```powershell
 docker compose down
 ```
-To also remove database volumes and reset all logs  :
+To also remove database volumes and reset all logs :
 ```powershell    
 docker compose down -v
 ```
