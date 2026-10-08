@@ -175,7 +175,11 @@ int main() {
             try { risk_score = std::stoi(risk_str); } catch (...) {}
         }
 
-        bool jwt_valid = !auth.empty();  // simplified JWT presence check
+        // Strict Bearer token validation
+        bool jwt_valid = false;
+        if (auth.rfind("Bearer ", 0) == 0 && auth.length() > 7) {
+            jwt_valid = true;
+        }
 
         // ── 1. Query Control Plane ───────────────────────────
         json eval_payload = {
